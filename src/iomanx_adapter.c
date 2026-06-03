@@ -573,6 +573,7 @@ static int iomanx_adapter_readdir(const char *path, void *buf, fuse_fill_dir_t f
         convert_stat_to_posix(&st, &(de.stat));
         if (filler(buf, de.name, &st, 0
 #if FUSE_USE_VERSION >= 30
+                   /* fuse_fill_dir_flags */
                    ,
                    0
 #endif
