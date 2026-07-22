@@ -4,12 +4,35 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <time.h>
+#endif
 
 #include "util.h"
 #include "iomanX_port.h"
 #include "hl.h"
 
 unsigned int total_sectors = 0;
+
+#define PUT_BUFFER_SIZE (256 * 1024)
+#define PUT_PROGRESS_INTERVAL_MS 1000
+#define PUT_PROGRESS_PREFIX "__PFS_PROGRESS__:"
+
+static unsigned long long get_progress_time_ms(void)
+{
+#ifdef _WIN32
+    return (unsigned long long)GetTickCount64();
+#else
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return (unsigned long long)now.tv_sec * 1000ULL +
+           (unsigned long long)now.tv_nsec / 1000000ULL;
+#endif
+}
 
 typedef struct
 {
@@ -617,21 +640,45 @@ static int do_put(context_t *ctx, int argc, char *argv[])
     if (in != -1) {
         int out = iomanX_open(tmp, FIO_O_WRONLY | FIO_O_CREAT, 0666);
         if (out >= 0) {
-            char buf[8 * 4096]; /* bigger buffer performs better via network */
+            char *buf = malloc(PUT_BUFFER_SIZE);
             ssize_t len;
-            while ((len = read(in, buf, sizeof(buf))) > 0) {
-                result = iomanX_write(out, buf, len);
-                if (result != len) {
-                    if (result < 0)
-                        fprintf(stderr, "(!) %s: %s.\n", tmp, strerror(-result));
-                    else
-                        fprintf(stderr, "(!) %s: wrote %d bytes instead of %lu.\n", tmp,
-                                result, len);
-                    result = -1;
-                    break;
+            unsigned long long transferred = 0;
+            unsigned long long last_progress_ms = get_progress_time_ms();
+
+            if (buf == NULL) {
+                fprintf(stderr, "(!) Unable to allocate the put buffer.\n");
+                result = -1;
+            } else {
+                while ((len = read(in, buf, PUT_BUFFER_SIZE)) > 0) {
+                    result = iomanX_write(out, buf, len);
+                    if (result != len) {
+                        if (result < 0)
+                            fprintf(stderr, "(!) %s: %s.\n", tmp, strerror(-result));
+                        else
+                            fprintf(stderr, "(!) %s: wrote %d bytes instead of %lu.\n", tmp,
+                                    result, len);
+                        result = -1;
+                        break;
+                    }
+
+                    transferred += (unsigned long long)result;
+                    unsigned long long now_ms = get_progress_time_ms();
+                    if (now_ms - last_progress_ms >= PUT_PROGRESS_INTERVAL_MS) {
+                        printf(PUT_PROGRESS_PREFIX "%llu\n", transferred);
+                        fflush(stdout);
+                        last_progress_ms = now_ms;
+                    }
                 }
+
+                free(buf);
             }
-            result = iomanX_close(out);
+            int close_result = iomanX_close(out);
+            if (result >= 0)
+                result = close_result;
+            if (result >= 0) {
+                printf(PUT_PROGRESS_PREFIX "%llu\n", transferred);
+                fflush(stdout);
+            }
         } else
             fprintf(stderr, "(!) %s: %s.\n", tmp, strerror(-out)), result = out;
         (void)close(in);

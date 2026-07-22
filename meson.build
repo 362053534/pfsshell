@@ -48,6 +48,9 @@ pfsshell_dependson = [
 	libiomanX_dep,
 	libhdlfs_dep,
 ]
+if host_system == 'windows' and cc.get_id() != 'msvc' and cc.get_id() != 'clang-cl'
+	pfsshell_dependson += cc.find_library('winpthread')
+endif
 pfsshell = executable('pfsshell', sources: pfsshell_src, c_args: pfsshell_cflags, link_args: pfsshell_ldflags, dependencies: pfsshell_dependson, install: true)
 libps2hdd = shared_library('ps2hdd', sources: pfsshell_src, c_args: pfsshell_cflags, link_args: pfsshell_ldflags, dependencies: pfsshell_dependson, install: true)
 
