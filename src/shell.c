@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <io.h>
+#include <wchar.h>
 #else
 #include <time.h>
 #endif
@@ -33,6 +35,43 @@ static unsigned long long get_progress_time_ms(void)
            (unsigned long long)now.tv_nsec / 1000000ULL;
 #endif
 }
+
+#ifdef _WIN32
+/* Windows 本地路径使用 GBK 字节；转换后交给宽字符 API，避免 CRT 窄字符路径受系统区域设置影响。 */
+static wchar_t *gbk_to_wide(const char *value)
+{
+    int length = MultiByteToWideChar(936, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
+    if (length == 0)
+        length = MultiByteToWideChar(936, 0, value, -1, NULL, 0);
+    if (length == 0)
+        return NULL;
+
+    wchar_t *wide = malloc((size_t)length * sizeof(wchar_t));
+    if (!wide)
+        return NULL;
+    if (MultiByteToWideChar(936, 0, value, -1, wide, length) == 0) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+static char *wide_to_gbk(const wchar_t *value)
+{
+    int length = WideCharToMultiByte(936, 0, value, -1, NULL, 0, NULL, NULL);
+    if (length == 0)
+        return NULL;
+
+    char *gbk = malloc((size_t)length);
+    if (!gbk)
+        return NULL;
+    if (WideCharToMultiByte(936, 0, value, -1, gbk, length, NULL, NULL) == 0) {
+        free(gbk);
+        return NULL;
+    }
+    return gbk;
+}
+#endif
 
 typedef struct
 {
@@ -171,15 +210,39 @@ static int shell_loop(FILE *in, FILE *out, FILE *err,
 static int do_lcd(context_t *ctx, int argc, char *argv[])
 {
     if (argc == 1) { /* display local working dir */
+#ifdef _WIN32
+        wchar_t wide_path[32768];
+        if (_wgetcwd(wide_path, sizeof(wide_path) / sizeof(wide_path[0]))) {
+            char *path = wide_to_gbk(wide_path);
+            if (path) {
+                printf("%s\n", path);
+                free(path);
+                return (0);
+            }
+        }
+#else
         char buf[256];
         if (getcwd(buf, sizeof(buf))) {
             printf("%s\n", buf);
             return (0);
         }
+#endif
         return (-1);
-    } else
+    } else {
         /* chdir would set errno on error */
+#ifdef _WIN32
+        wchar_t *path = gbk_to_wide(argv[1]);
+        if (!path) {
+            errno = EINVAL;
+            return (-1);
+        }
+        int result = _wchdir(path);
+        free(path);
+        return (result);
+#else
         return (chdir(argv[1]));
+#endif
+    }
 }
 static int do_df(context_t *ctx, int argc, char *argv[])
 {
@@ -592,7 +655,25 @@ static int do_get(context_t *ctx, int argc, char *argv[])
 
     int in = iomanX_open(tmp, FIO_O_RDONLY);
     if (in >= 0) {
-        int out = open(argv[1], O_CREAT | O_WRONLY |
+        int out;
+#ifdef _WIN32
+        wchar_t *local_path = gbk_to_wide(argv[1]);
+        if (!local_path) {
+            errno = EINVAL;
+            out = -1;
+        } else {
+            out = _wopen(local_path, O_CREAT | O_WRONLY |
+#ifdef O_BINARY
+                                      O_BINARY
+#else
+                                      0
+#endif
+                         ,
+                         0664);
+            free(local_path);
+        }
+#else
+        out = open(argv[1], O_CREAT | O_WRONLY |
 #ifdef O_BINARY
                                     O_BINARY
 #else
@@ -600,6 +681,7 @@ static int do_get(context_t *ctx, int argc, char *argv[])
 #endif
                        ,
                        0664);
+#endif
         if (out != -1) {
             char buf[4096];
             ssize_t len;
@@ -630,13 +712,31 @@ static int do_put(context_t *ctx, int argc, char *argv[])
         strcat(tmp, "/");
     strcat(tmp, argv[1]);
 
-    int in = open(argv[1], O_RDONLY |
+    int in;
+#ifdef _WIN32
+    wchar_t *local_path = gbk_to_wide(argv[1]);
+    if (!local_path) {
+        errno = EINVAL;
+        in = -1;
+    } else {
+        in = _wopen(local_path, O_RDONLY |
+#ifdef O_BINARY
+                                       O_BINARY
+#else
+                                       0
+#endif
+                    );
+        free(local_path);
+    }
+#else
+    in = open(argv[1], O_RDONLY |
 #ifdef O_BINARY
                                O_BINARY
 #else
                                0
 #endif
     );
+#endif
     if (in != -1) {
         int out = iomanX_open(tmp, FIO_O_WRONLY | FIO_O_CREAT, 0666);
         if (out >= 0) {
