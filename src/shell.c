@@ -37,39 +37,64 @@ static unsigned long long get_progress_time_ms(void)
 }
 
 #ifdef _WIN32
-/* Windows 本地路径使用 GBK 字节；转换后交给宽字符 API，避免 CRT 窄字符路径受系统区域设置影响。 */
-static wchar_t *gbk_to_wide(const char *value)
+/* 本工具链约定：shell 入参中的路径/PFS 名均为 UTF-8 字节；再转为宽字符调用 Win32。 */
+static wchar_t *mb_to_wide(const char *value, UINT codePage)
 {
-    int length = MultiByteToWideChar(936, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
+    int length = MultiByteToWideChar(codePage, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
     if (length == 0)
-        length = MultiByteToWideChar(936, 0, value, -1, NULL, 0);
+        length = MultiByteToWideChar(codePage, 0, value, -1, NULL, 0);
     if (length == 0)
         return NULL;
 
     wchar_t *wide = malloc((size_t)length * sizeof(wchar_t));
     if (!wide)
         return NULL;
-    if (MultiByteToWideChar(936, 0, value, -1, wide, length) == 0) {
+    if (MultiByteToWideChar(codePage, 0, value, -1, wide, length) == 0) {
         free(wide);
         return NULL;
     }
     return wide;
 }
 
-static char *wide_to_gbk(const wchar_t *value)
+static wchar_t *utf8_to_wide(const char *value)
 {
-    int length = WideCharToMultiByte(936, 0, value, -1, NULL, 0, NULL, NULL);
+    return mb_to_wide(value, CP_UTF8);
+}
+
+static char *wide_to_utf8(const wchar_t *value)
+{
+    int length = WideCharToMultiByte(CP_UTF8, 0, value, -1, NULL, 0, NULL, NULL);
     if (length == 0)
         return NULL;
 
-    char *gbk = malloc((size_t)length);
-    if (!gbk)
+    char *utf8 = malloc((size_t)length);
+    if (!utf8)
         return NULL;
-    if (WideCharToMultiByte(936, 0, value, -1, gbk, length, NULL, NULL) == 0) {
-        free(gbk);
+    if (WideCharToMultiByte(CP_UTF8, 0, value, -1, utf8, length, NULL, NULL) == 0) {
+        free(utf8);
         return NULL;
     }
-    return gbk;
+    return utf8;
+}
+
+static int is_windows_abs_path(const char *path)
+{
+    if (path == NULL || path[0] == '\0')
+        return 0;
+    if (path[0] == '\\' && path[1] == '\\')
+        return 1; /* UNC */
+    if (((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':')
+        return 1;
+    return 0;
+}
+
+static const char *path_basename_bytes(const char *path)
+{
+    const char *slash = strrchr(path, '\\');
+    const char *slash_fwd = strrchr(path, '/');
+    if (slash_fwd != NULL && (slash == NULL || slash_fwd > slash))
+        slash = slash_fwd;
+    return (slash != NULL) ? (slash + 1) : path;
 }
 #endif
 
@@ -110,57 +135,55 @@ static int check_requirements(context_t *ctx, enum requirements req)
 }
 
 #ifdef NEED_GETLINE
-size_t getline(char **lineptr, size_t *n, FILE *stream)
+/* Windows 无原生 getline；此前 realloc 后未修正写指针，长命令行会堆损坏。 */
+ssize_t getline(char **lineptr, size_t *n, FILE *stream)
 {
-    char *bufptr = NULL;
+    char *bufptr;
     char *p;
     size_t size;
     int c;
 
-    if (lineptr == NULL) {
+    if (lineptr == NULL || stream == NULL || n == NULL)
         return -1;
-    }
-    if (stream == NULL) {
-        return -1;
-    }
-    if (n == NULL) {
-        return -1;
-    }
+
     bufptr = *lineptr;
     size = *n;
 
     c = fgetc(stream);
-    if (c == EOF) {
+    if (c == EOF)
         return -1;
-    }
+
     if (bufptr == NULL) {
-        bufptr = malloc(128);
-        if (bufptr == NULL) {
+        size = 256;
+        bufptr = malloc(size);
+        if (bufptr == NULL)
             return -1;
-        }
-        size = 128;
+        *lineptr = bufptr;
+        *n = size;
     }
     p = bufptr;
     while (c != EOF) {
-        if ((p - bufptr) > (size - 1)) {
-            size = size + 128;
-            bufptr = realloc(bufptr, size);
-            if (bufptr == NULL) {
+        /* 预留当前字节与结尾 NUL */
+        if ((size_t)(p - bufptr) + 2 > size) {
+            size_t offset = (size_t)(p - bufptr);
+            size_t new_size = size + 256;
+            char *new_buf = realloc(bufptr, new_size);
+            if (new_buf == NULL)
                 return -1;
-            }
+            bufptr = new_buf;
+            size = new_size;
+            p = bufptr + offset;
+            *lineptr = bufptr;
+            *n = size;
         }
-        *p++ = c;
-        if (c == '\n') {
+        *p++ = (char)c;
+        if (c == '\n')
             break;
-        }
         c = fgetc(stream);
     }
 
-    *p++ = '\0';
-    *lineptr = bufptr;
-    *n = size;
-
-    return p - bufptr - 1;
+    *p = '\0';
+    return (ssize_t)(p - bufptr);
 }
 #endif
 
@@ -213,7 +236,7 @@ static int do_lcd(context_t *ctx, int argc, char *argv[])
 #ifdef _WIN32
         wchar_t wide_path[32768];
         if (_wgetcwd(wide_path, sizeof(wide_path) / sizeof(wide_path[0]))) {
-            char *path = wide_to_gbk(wide_path);
+            char *path = wide_to_utf8(wide_path);
             if (path) {
                 printf("%s\n", path);
                 free(path);
@@ -231,7 +254,7 @@ static int do_lcd(context_t *ctx, int argc, char *argv[])
     } else {
         /* chdir would set errno on error */
 #ifdef _WIN32
-        wchar_t *path = gbk_to_wide(argv[1]);
+        wchar_t *path = utf8_to_wide(argv[1]);
         if (!path) {
             errno = EINVAL;
             return (-1);
@@ -617,7 +640,11 @@ static int do_cd(context_t *ctx, int argc, char *argv[])
 
 static int do_mkdir(context_t *ctx, int argc, char *argv[])
 {
-    char tmp[256];
+    char tmp[512];
+    if (strlen("pfs0:") + strlen(ctx->path) + 1 + strlen(argv[1]) >= sizeof(tmp)) {
+        fprintf(stderr, "(!) Path too long.\n");
+        return (-1);
+    }
     strcpy(tmp, "pfs0:");
     strcat(tmp, ctx->path);
     if (tmp[strlen(tmp) - 1] != '/')
@@ -631,7 +658,11 @@ static int do_mkdir(context_t *ctx, int argc, char *argv[])
 
 static int do_rmdir(context_t *ctx, int argc, char *argv[])
 {
-    char tmp[256];
+    char tmp[512];
+    if (strlen("pfs0:") + strlen(ctx->path) + 1 + strlen(argv[1]) >= sizeof(tmp)) {
+        fprintf(stderr, "(!) Path too long.\n");
+        return (-1);
+    }
     strcpy(tmp, "pfs0:");
     strcat(tmp, ctx->path);
     if (tmp[strlen(tmp) - 1] != '/')
@@ -646,23 +677,31 @@ static int do_rmdir(context_t *ctx, int argc, char *argv[])
 static int do_get(context_t *ctx, int argc, char *argv[])
 {
     int result = 0;
-    char tmp[256];
+    char tmp[512];
+    const char *remote_name = argv[1];
+    const char *local_spec = (argc >= 3) ? argv[2] : argv[1];
+
+    if (strlen("pfs0:") + strlen(ctx->path) + 1 + strlen(remote_name) >= sizeof(tmp)) {
+        fprintf(stderr, "(!) Path too long.\n");
+        return (-1);
+    }
     strcpy(tmp, "pfs0:");
     strcat(tmp, ctx->path);
     if (tmp[strlen(tmp) - 1] != '/')
         strcat(tmp, "/");
-    strcat(tmp, argv[1]);
+    strcat(tmp, remote_name);
 
     int in = iomanX_open(tmp, FIO_O_RDONLY);
     if (in >= 0) {
         int out;
 #ifdef _WIN32
-        wchar_t *local_path = gbk_to_wide(argv[1]);
+        /* 本地路径与 PFS 名均为 UTF-8；单参数 get 时本地文件名即 PFS 名。 */
+        wchar_t *local_path = utf8_to_wide(local_spec);
         if (!local_path) {
             errno = EINVAL;
             out = -1;
         } else {
-            out = _wopen(local_path, O_CREAT | O_WRONLY |
+            out = _wopen(local_path, O_CREAT | O_WRONLY | O_TRUNC |
 #ifdef O_BINARY
                                       O_BINARY
 #else
@@ -673,7 +712,7 @@ static int do_get(context_t *ctx, int argc, char *argv[])
             free(local_path);
         }
 #else
-        out = open(argv[1], O_CREAT | O_WRONLY |
+        out = open(local_spec, O_CREAT | O_WRONLY | O_TRUNC |
 #ifdef O_BINARY
                                     O_BINARY
 #else
@@ -688,14 +727,14 @@ static int do_get(context_t *ctx, int argc, char *argv[])
             while ((len = iomanX_read(in, buf, sizeof(buf))) > 0) {
                 result = write(out, buf, len);
                 if (result != len) {
-                    perror(argv[1]);
+                    perror(local_spec);
                     result = -1;
                     break;
                 }
             }
             result = close(out);
         } else
-            perror(argv[1]), result = -1;
+            perror(local_spec), result = -1;
         iomanX_close(in);
     } else
         fprintf(stderr, "(!) %s: %s.\n", tmp, strerror(-in)), result = in;
@@ -705,16 +744,29 @@ static int do_get(context_t *ctx, int argc, char *argv[])
 static int do_put(context_t *ctx, int argc, char *argv[])
 {
     int result = 0;
-    char tmp[256];
+    char tmp[512];
+    const char *local_spec = argv[1];
+    const char *remote_name = argv[1];
+#ifdef _WIN32
+    if (argc >= 3)
+        remote_name = argv[2]; /* 显式 PFS 名（UTF-8 字节） */
+    else if (is_windows_abs_path(argv[1]))
+        remote_name = path_basename_bytes(argv[1]);
+#endif
+
+    if (strlen("pfs0:") + strlen(ctx->path) + 1 + strlen(remote_name) >= sizeof(tmp)) {
+        fprintf(stderr, "(!) Path too long.\n");
+        return (-1);
+    }
     strcpy(tmp, "pfs0:");
     strcat(tmp, ctx->path);
     if (tmp[strlen(tmp) - 1] != '/')
         strcat(tmp, "/");
-    strcat(tmp, argv[1]);
+    strcat(tmp, remote_name);
 
     int in;
 #ifdef _WIN32
-    wchar_t *local_path = gbk_to_wide(argv[1]);
+    wchar_t *local_path = utf8_to_wide(local_spec);
     if (!local_path) {
         errno = EINVAL;
         in = -1;
@@ -756,7 +808,7 @@ static int do_put(context_t *ctx, int argc, char *argv[])
                             fprintf(stderr, "(!) %s: %s.\n", tmp, strerror(-result));
                         else
                             fprintf(stderr, "(!) %s: wrote %d bytes instead of %lu.\n", tmp,
-                                    result, len);
+                                    result, (unsigned long)len);
                         result = -1;
                         break;
                     }
@@ -783,13 +835,17 @@ static int do_put(context_t *ctx, int argc, char *argv[])
             fprintf(stderr, "(!) %s: %s.\n", tmp, strerror(-out)), result = out;
         (void)close(in);
     } else
-        perror(argv[1]), result = -1;
+        perror(local_spec), result = -1;
     return (result);
 }
 
 static int do_rm(context_t *ctx, int argc, char *argv[])
 {
-    char tmp[256];
+    char tmp[512];
+    if (strlen("pfs0:") + strlen(ctx->path) + 1 + strlen(argv[1]) >= sizeof(tmp)) {
+        fprintf(stderr, "(!) Path too long.\n");
+        return (-1);
+    }
     strcpy(tmp, "pfs0:");
     strcat(tmp, ctx->path);
     if (tmp[strlen(tmp) - 1] != '/')
@@ -803,17 +859,20 @@ static int do_rm(context_t *ctx, int argc, char *argv[])
 
 static int do_rename(context_t *ctx, int argc, char *argv[])
 {
-    char tmp[256];
+    char tmp[512];
     if (!ctx->mount)
         strcpy(tmp, "hdd0:");
     else {
+        if (strlen("pfs0:") + strlen(ctx->path) + 1 + strlen(argv[1]) >= sizeof(tmp)) {
+            fprintf(stderr, "(!) Path too long.\n");
+            return (-1);
+        }
         strcpy(tmp, "pfs0:");
         strcat(tmp, ctx->path);
         if (tmp[strlen(tmp) - 1] != '/')
             strcat(tmp, "/");
     }
     strcat(tmp, argv[1]);
-    tmp[sizeof(tmp) - 1] = '\0'; // Ensure null-termination
     int result = iomanX_rename(tmp, argv[2]);
     if (result < 0)
         fprintf(stderr, "(!) %s: %s.\n", tmp, strerror(-result));
@@ -850,9 +909,9 @@ static int do_help(context_t *ctx, int argc, char *argv[])
         "rmdir <dir_name> - delete an existing empty directory;\n"
         "pwd - print current PS2 HDD directory;\n"
         "cd <dir_name> - change directory;\n"
-        "get <file_name> - copy file from PS2 HDD to current dir;\n"
-        "put <file_name> - copy file from current dir to PS2 HDD;\n"
-        "\tfile name must not contain a path;\n"
+        "get <file_name> [local_path] - copy file from PS2 HDD; optional local absolute path (UTF-8);\n"
+        "put <local_path> [pfs_name] - copy file to PS2 HDD; paths/names are UTF-8 on Windows;\n"
+        "\toptional pfs_name is stored as UTF-8 bytes on PFS; absolute local path allowed;\n"
         "rm <file_name> - delete a file;\n"
         "rename <curr_name> <new_name> - rename a file/dir/partition.\n"
         "rmpart <part_name> - remove partition (destructive).\n"
@@ -891,7 +950,9 @@ static int exec(void *data, int argc, char *argv[])
         {"pwd", 0, need_device + need_mount, &do_pwd},
         {"cd", 1, need_device + need_mount, &do_cd},
         {"get", 1, need_device + need_mount, &do_get},
+        {"get", 2, need_device + need_mount, &do_get},
         {"put", 1, need_device + need_mount, &do_put},
+        {"put", 2, need_device + need_mount, &do_put},
         {"rm", 1, need_device + need_mount, &do_rm},
         {"rmpart", 1, need_device, &do_rmpart},
         {"df", 0, need_device, &do_df},

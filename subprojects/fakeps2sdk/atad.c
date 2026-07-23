@@ -95,7 +95,32 @@ int set_atad_device_handle(int fd)
 void set_atad_device_path(const char *path)
 {
     int fd;
+#ifdef _WIN32
+    /* 与 shell 一致：设备/镜像路径按 UTF-8 转宽字符打开。 */
+    int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (length == 0)
+        length = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    if (length == 0) {
+        perror(path);
+        exit(1);
+    }
+    {
+        wchar_t *wide = malloc((size_t)length * sizeof(wchar_t));
+        if (!wide) {
+            perror(path);
+            exit(1);
+        }
+        if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, length) == 0) {
+            free(wide);
+            perror(path);
+            exit(1);
+        }
+        fd = _wopen(wide, O_RDWR | O_BINARY);
+        free(wide);
+    }
+#else
     fd = open(path, O_RDWR | O_BINARY);
+#endif
     if (fd == -1 || set_atad_device_handle(fd)) {
         perror(path), exit(1);
     }
