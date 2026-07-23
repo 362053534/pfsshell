@@ -528,19 +528,24 @@ static int apaRename(s32 device, const char *oldId, const char *newId)
 {
     apa_cache_t *clink;
     int i, rv;
+    char oldIdBuffer[APA_IDMAX];
+    char newIdBuffer[APA_IDMAX];
+
+    memset(oldIdBuffer, 0, sizeof(oldIdBuffer));
+    memset(newIdBuffer, 0, sizeof(newIdBuffer));
+    strncpy(oldIdBuffer, oldId, APA_IDMAX - 1);
+    strncpy(newIdBuffer, newId, APA_IDMAX - 1);
 
     // look to see if can make(newname) or not...
-    if ((clink = apaFindPartition(device, newId, &rv)) != NULL) {
+    if ((clink = apaFindPartition(device, newIdBuffer, &rv)) != NULL) {
         apaCacheFree(clink);
-        SignalSema(fioSema);
         return -EEXIST; // File exists
     }
 
     // look to see if open(oldname)
     for (i = 0; i < apaMaxOpen; i++) {
         if (hddFileSlots[i].f != NULL) {
-            if (memcmp(hddFileSlots[i].id, oldId, APA_IDMAX) == 0) {
-                SignalSema(fioSema);
+            if (memcmp(hddFileSlots[i].id, oldIdBuffer, APA_IDMAX) == 0) {
                 return -EBUSY;
             }
         }
@@ -548,19 +553,18 @@ static int apaRename(s32 device, const char *oldId, const char *newId)
 
     // Do not allow system partitions (__*) to be renamed.
 #ifndef APA_ALLOW_REMOVE_PARTITION_WITH_LEADING_UNDERSCORE
-    if (oldId[0] == '_' && oldId[1] == '_')
+    if (oldIdBuffer[0] == '_' && oldIdBuffer[1] == '_')
         return -EACCES;
 #endif
 
     // find :)
-    if ((clink = apaFindPartition(device, oldId, &rv)) == NULL) {
-        SignalSema(fioSema);
+    if ((clink = apaFindPartition(device, oldIdBuffer, &rv)) == NULL) {
         return rv;
     }
 
     // do the renaming :) note: subs have no names!!
     memset(clink->header->id, 0, APA_IDMAX);
-    strncpy(clink->header->id, newId, APA_IDMAX - 1);
+    strncpy(clink->header->id, newIdBuffer, APA_IDMAX - 1);
 
     // touch creation time
     apaGetTime(&clink->header->created);

@@ -382,7 +382,7 @@ static int do_mkpart(context_t *ctx, int arg, char *argv[])
     char tmp[128];
     char openString[32 + 5];
     char part_type[9];
-    int i = 9;
+    int i = sizeof(sizesMB) / sizeof(sizesMB[0]);
     int result = -1;
     int partfd = 0;
 
